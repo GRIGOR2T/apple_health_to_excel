@@ -1,0 +1,60 @@
+# -----------------------------
+# macOS SYSTEM JUNK
+# -----------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Icon?
+Icon?
+._*
+
+# Thumbnails
+._.DS_Store
+
+# -----------------------------
+# PYTHON
+# -----------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.pdb
+*.tmp
+*.log
+
+# Byte-compiled / optimized / DLL files
+*.py[cod]
+*$py.class
+
+# -----------------------------
+# VIRTUAL ENVIRONMENTS
+# -----------------------------
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# -----------------------------
+# EDITORS / IDE
+# -----------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# -----------------------------
+# PROJECT-SPECIFIC
+# -----------------------------
+# Apple Health export file
+export.xml
+
+# Generated Excel reports
+*.xlsx
+
+# Temporary intermediate files
+tmp/
+cache/
