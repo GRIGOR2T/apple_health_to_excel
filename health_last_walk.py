@@ -3,6 +3,8 @@ import datetime as dt
 
 import pandas as pd
 from lxml import etree as ET
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font
 
 
 EXPORT_XML = Path("export.xml")
@@ -15,6 +17,18 @@ ZONES = [
     ("Zone 4", 150, 169),
     ("Zone 5", 170, 10_000),
 ]
+
+# Берём только записи с часов (как в других скриптах)
+PRIMARY_DEVICE_MARK = "Watch"
+
+
+def is_watch_source(elem: ET._Element) -> bool:
+    """
+    Источник — Apple Watch (по sourceName/device, с учётом NBSP).
+    """
+    src = (elem.get("sourceName") or "") + " " + (elem.get("device") or "")
+    src = src.replace("\u00a0", " ")
+    return PRIMARY_DEVICE_MARK in src
 
 
 def parse_apple_datetime(s: str) -> dt.datetime:
@@ -105,13 +119,20 @@ def collect_hr_and_dist(start: dt.datetime, end: dt.datetime, total_dist_km: flo
     Собираем:
     - пульс во время тренировки
     - расстояние во времени (для сплитов)
-    Авто-определение: записи distance – инкрементальные или кумулятивные.
+
+    Теперь берём только записи с WATCH,
+    чтобы не было дублей с айфона.
     """
     hr_samples = []              # (time, bpm)
     dist_samples_raw = []        # (time, value_km)
 
     context = ET.iterparse(str(EXPORT_XML), events=("end",), tag="Record")
     for _, elem in context:
+        # фильтруем источник
+        if not is_watch_source(elem):
+            elem.clear()
+            continue
+
         rtype = elem.get("type")
 
         s = parse_apple_datetime(elem.get("startDate"))
@@ -149,20 +170,15 @@ def collect_hr_and_dist(start: dt.datetime, end: dt.datetime, total_dist_km: flo
     if not dist_samples_raw:
         return hr_samples, []
 
-    # Определяем, delta или cumulative
+    # Авто-определение delta / cumulative
     vals = [v for _, v in dist_samples_raw]
     max_val = max(vals)
     sum_val = sum(vals)
-    mode = None
 
-    # Чем ближе к общей дистанции — тем правильнее
     diff_if_delta = abs(sum_val - total_dist_km)
     diff_if_cum = abs(max_val - total_dist_km)
 
-    if diff_if_delta < diff_if_cum:
-        mode = "delta"
-    else:
-        mode = "cumulative"
+    mode = "delta" if diff_if_delta <= diff_if_cum else "cumulative"
 
     dist_samples = []
     if mode == "delta":
@@ -218,91 +234,100 @@ def format_pace(duration: dt.timedelta, distance_km: float) -> str:
     return f"{m}'{s:02d}\"/KM"
 
 
+def autoformat_sheet(ws):
+    for col_idx, col in enumerate(ws.columns, start=1):
+        max_len = 0
+        for cell in col:
+            cell.font = Font(size=28)
+            if cell.value is not None:
+                val_str = str(cell.value)
+                if len(val_str) > max_len:
+                    max_len = len(val_str)
+        # Делаем колонки заметно шире: небольшой запас + минимальная ширина
+        padding = 10
+        min_width = 26
+        width = max(max_len + padding, min_width)
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+
 def compute_splits(hr_samples, dist_samples, start: dt.datetime, total_dist_km: float):
     """
     Строим сплиты:
-    - точки по 1 км + последний неполный
-    - интерполяция по дистанции
+      - по каждому полному километру (1,2,3,...)
+      - + при необходимости последний неполный кусок
     """
     if not dist_samples:
         return []
 
-    # Список целевых дистанций (1,2,... + последний неполный)
-    bounds = []
-    km = 1.0
-    while km < total_dist_km - 0.05:
-        bounds.append(km)
-        km += 1.0
-    # Последний неполный
-    if total_dist_km - int(total_dist_km) > 0.05:
+    EPS = 0.05  # допуск по длине отрезка (50 м)
+
+    # сколько полных километров считаем сплитами
+    num_full = int(total_dist_km + EPS)  # для 12.01 -> 12
+
+    bounds = [k for k in range(1, num_full + 1)]
+
+    # если после этого остался заметный хвост (больше ~50 м) — добавим его как отдельный сплит
+    leftover = total_dist_km - num_full
+    if leftover > EPS:
         bounds.append(total_dist_km)
 
     if not bounds:
         return []
 
-    # Готовим массивы
     times = [t for t, _ in dist_samples]
     dists = [d for _, d in dist_samples]
 
     splits = []
-
-    prev_time = start
-    prev_dist = 0.0
-
+    prev_t = start
     hr_samples_sorted = sorted(hr_samples, key=lambda x: x[0])
 
     idx = 0
     n = len(times)
+    prev_dist = 0.0
 
     for i, target in enumerate(bounds, start=1):
-        # ищем сегмент, где cum_dist пересекает target
+        # ищем участок, где cum_dist пересекает target
         while idx < n and dists[idx] < target:
-            prev_time = times[idx]
+            prev_t = times[idx]
             prev_dist = dists[idx]
             idx += 1
         if idx == n:
             break
 
-        cur_time = times[idx]
+        cur_t = times[idx]
         cur_dist = dists[idx]
 
-        # Интерполяция по дистанции
+        # линейная интерполяция момента достижения нужной дистанции
         if cur_dist == prev_dist:
-            t_target = cur_time
+            t_target = cur_t
         else:
             frac = (target - prev_dist) / (cur_dist - prev_dist)
-            delta_t = cur_time - prev_time
-            t_target = prev_time + dt.timedelta(seconds=delta_t.total_seconds() * frac)
+            dt_sec = (cur_t - prev_t).total_seconds()
+            t_target = prev_t + dt.timedelta(seconds=dt_sec * frac)
 
-        # Параметры сплита
-        split_duration = t_target - (splits[-1]["_t_end"] if splits else start)
+        # границы сплита по времени
+        t_start_split = splits[-1]["_t_end"] if splits else start
+        t_end_split = t_target
+
+        split_duration = t_end_split - t_start_split
         sec = int(split_duration.total_seconds())
         pace_min = sec // 60
         pace_sec = sec % 60
 
-        # Средний пульс за сплит
-        t_start_split = splits[-1]["_t_end"] if splits else start
-        t_end_split = t_target
+        # средний пульс внутри сплита
         hr_vals = [v for (t, v) in hr_samples_sorted if t_start_split <= t <= t_end_split]
         avg_hr = int(round(sum(hr_vals) / len(hr_vals))) if hr_vals else 0
-
-        # Время суток (Time колонка)
-        time_of_day = t_target.strftime("%H:%M")
 
         splits.append(
             {
                 "KM": i,
-                "Time": time_of_day,
+                "Time": t_target.strftime("%H:%M"),
                 "Pace": f"{pace_min}'{pace_sec:02d}\"/KM",
                 "Heart Rate": f"{avg_hr} BPM",
-                "_t_end": t_target,  # служебное поле, потом уберём
+                "_t_end": t_target,
             }
         )
 
-        prev_time = t_target
-        prev_dist = target
-
-    # Удаляем служебное поле
     for sp in splits:
         sp.pop("_t_end", None)
 
@@ -370,6 +395,9 @@ def main():
     with pd.ExcelWriter(out_name, engine="openpyxl") as writer:
         left_df.to_excel(writer, sheet_name="Sheet1", index=False, startrow=0, startcol=0)
         right_df.to_excel(writer, sheet_name="Sheet1", index=False, startrow=0, startcol=3)
+        ws = writer.sheets["Sheet1"]
+        ws.freeze_panes = "A2"
+        autoformat_sheet(ws)
 
     print(f"Готово: {out_name}")
 

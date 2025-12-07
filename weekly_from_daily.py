@@ -4,27 +4,46 @@ import pandas as pd
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font
 
-INPUT_FILE = Path("daily_walk.xlsx")      # <-- имя твоего файла с листом Daily_walk
+INPUT_FILE = Path("daily_walk.xlsx")  # файл с листом Daily_walk
 
 
 def autoformat_sheet(ws):
+    """
+    Делает таблицу удобной:
+    - заголовки: шрифт 16, жирный
+    - данные: шрифт 14
+    - ширина колонок: макс(длина текста + 4, 18)
+    """
+    # сначала проставим шрифты
+    for row_idx, row in enumerate(ws.iter_rows(), start=1):
+        for cell in row:
+            if row_idx == 1:
+                # заголовки
+                cell.font = Font(size=16, bold=True)
+            else:
+                cell.font = Font(size=14)
+
+    # теперь подберём ширину
     for col_idx, column_cells in enumerate(ws.columns, start=1):
         max_len = 0
         for cell in column_cells:
-            cell.font = Font(size=28)
             val = cell.value
             if val is None:
                 continue
             text = str(val)
-            max_len = max(max_len, len(text))
-        ws.column_dimensions[get_column_letter(col_idx)].width = max_len + 4
+            if len(text) > max_len:
+                max_len = len(text)
+
+        # запас + минимальная ширина
+        width = max(max_len + 4, 18)
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
 
 
 def main():
     # читаем лист Daily_walk
     df = pd.read_excel(INPUT_FILE, sheet_name="Daily_walk")
 
-    # дата
+    # приводим дату к datetime
     df["date"] = pd.to_datetime(df["Дата"], format="%m/%d/%Y")
 
     # фильтр: только с 1 октября 2025
@@ -51,7 +70,9 @@ def main():
 
     # среднее в день по каждой неделе
     weekly["avg_total_km_per_day"] = weekly["total_walk_km"] / weekly["days_with_data"]
-    weekly["avg_nonwork_km_per_day"] = weekly["nonwork_walk_km"] / weekly["days_with_data"]
+    weekly["avg_nonwork_km_per_day"] = (
+        weekly["nonwork_walk_km"] / weekly["days_with_data"]
+    )
 
     # доля «тихой» ходьбы
     weekly["nonwork_share_%"] = (
@@ -59,15 +80,22 @@ def main():
     ).round(1)
 
     # сортировка от новых недель к старым
-    weekly = weekly.sort_values(["year", "week"], ascending=False).reset_index(drop=True)
+    weekly = weekly.sort_values(["year", "week"], ascending=False).reset_index(
+        drop=True
+    )
 
     # красивый формат дат
     weekly["Начало недели"] = weekly["week_start"].dt.strftime("%d.%m.%Y")
     weekly["Конец недели"] = weekly["week_end"].dt.strftime("%d.%m.%Y")
 
-    # округление километров
-    for col in ["total_walk_km", "workout_walk_km", "nonwork_walk_km",
-                "avg_total_km_per_day", "avg_nonwork_km_per_day"]:
+    # округление километров и средних
+    for col in [
+        "total_walk_km",
+        "workout_walk_km",
+        "nonwork_walk_km",
+        "avg_total_km_per_day",
+        "avg_nonwork_km_per_day",
+    ]:
         weekly[col] = weekly[col].round(2)
 
     # финальный порядок колонок

@@ -231,7 +231,7 @@ def build_daily_walk_table(df_daily_dist: pd.DataFrame, df_workouts: pd.DataFram
 
 def output_filename() -> str:
     now = dt.datetime.now().strftime("%Y%m%d_%H%M")
-    return f"daily_walk_summary_{now}.xlsx"
+    return f"daily_walk.xlsx"
 
 
 def autoformat_sheet(ws):
