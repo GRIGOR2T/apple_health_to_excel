@@ -238,16 +238,16 @@ def autoformat_sheet(ws):
     for col_idx, col in enumerate(ws.columns, start=1):
         max_len = 0
         for cell in col:
+                """Увеличиваем шрифт и выставляем ширину колонок по длине заголовков (строка 1)."""
+    # 1) Шрифт для всех ячеек
+    for row in ws.iter_rows():
+        for cell in row:
             cell.font = Font(size=28)
-            if cell.value is not None:
-                val_str = str(cell.value)
-                if len(val_str) > max_len:
-                    max_len = len(val_str)
         # Делаем колонки заметно шире: небольшой запас + минимальная ширина
-        padding = 10
-        min_width = 26
-        width = max(max_len + padding, min_width)
-        ws.column_dimensions[get_column_letter(col_idx)].width = width
+        # padding = 12
+        # min_width = 60
+        # width = max(max_len + padding, min_width)
+        # ws.column_dimensions[get_column_letter(col_idx)].width = width
 
 
 def compute_splits(hr_samples, dist_samples, start: dt.datetime, total_dist_km: float):
