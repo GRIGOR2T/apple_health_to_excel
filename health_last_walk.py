@@ -1,10 +1,11 @@
 from pathlib import Path
+import sys
 import datetime as dt
 
 import pandas as pd
 from lxml import etree as ET
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font
+from openpyxl.styles import Font, PatternFill
 
 
 EXPORT_XML = Path("export.xml")
@@ -36,7 +37,7 @@ def parse_apple_datetime(s: str) -> dt.datetime:
     return dt.datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
 
 
-def find_last_walking_workout():
+def find_last_walking_workout(target_date: dt.date | None = None):
     """
     Находим последнюю Walking-тренировку и
     сразу берём duration, kcal, дистанцию, набор высоты.
@@ -50,6 +51,11 @@ def find_last_walking_workout():
         if wtype == "HKWorkoutActivityTypeWalking":
             start = parse_apple_datetime(elem.get("startDate"))
             end = parse_apple_datetime(elem.get("endDate"))
+
+            # Если задана конкретная дата, берём только тренировки этого дня
+            if target_date is not None and start.date() != target_date:
+                elem.clear()
+                continue
 
             if last_start is None or start > last_start:
                 last_start = start
@@ -97,6 +103,8 @@ def find_last_walking_workout():
     del context
 
     if best is None:
+        if target_date is not None:
+            raise RuntimeError(f"Walking-тренировок в export.xml не найдено для даты {target_date}")
         raise RuntimeError("Walking-тренировок в export.xml не найдено")
 
     if best["basal_kcal"] is None:
@@ -235,19 +243,74 @@ def format_pace(duration: dt.timedelta, distance_km: float) -> str:
 
 
 def autoformat_sheet(ws):
-    for col_idx, col in enumerate(ws.columns, start=1):
-        max_len = 0
-        for cell in col:
-                """Увеличиваем шрифт и выставляем ширину колонок по длине заголовков (строка 1)."""
-    # 1) Шрифт для всех ячеек
+    """Увеличиваем шрифт, выставляем ширину колонок по заголовкам
+    и красим основные метрики и сплиты в стиле Apple Fitness+.
+    """
+    # 1) Шрифт: заголовки жирные, всё остальное крупным шрифтом
     for row in ws.iter_rows():
         for cell in row:
-            cell.font = Font(size=28)
-        # Делаем колонки заметно шире: небольшой запас + минимальная ширина
-        # padding = 12
-        # min_width = 60
-        # width = max(max_len + padding, min_width)
-        # ws.column_dimensions[get_column_letter(col_idx)].width = width
+            if cell.row == 1:
+                cell.font = Font(size=28, bold=True)
+            else:
+                cell.font = Font(size=28)
+
+    # 2) Ширина колонок по максимальной длине текста во всей колонке
+    for col_cells in ws.columns:
+        max_len = 0
+        col_idx = col_cells[0].column
+
+        for cell in col_cells:
+            val = cell.value
+            if val is None:
+                continue
+            length = len(str(val))
+            if length > max_len:
+                max_len = length
+
+        if max_len == 0:
+            continue
+
+        # для шрифта 28 обычная "символьная" ширина узкая, поэтому
+        # умножаем длину строки на коэффициент, чтобы текст точно влезал
+        adjusted_width = max_len * 2.0 + 4  # небольшой запас
+        ws.column_dimensions[get_column_letter(col_idx)].width = adjusted_width
+
+    # 3) Цвета в стиле Apple Fitness (без чёрного фона)
+    yellow_fill = PatternFill(start_color="FFFFD60A", end_color="FFFFD60A", fill_type="solid")
+    teal_fill = PatternFill(start_color="FF40C8E0", end_color="FF40C8E0", fill_type="solid")
+    red_fill = PatternFill(start_color="FFFF375F", end_color="FFFF375F", fill_type="solid")
+    green_fill = PatternFill(start_color="FF30D158", end_color="FF30D158", fill_type="solid")
+    orange_fill = PatternFill(start_color="FFFF453A", end_color="FFFF453A", fill_type="solid")
+
+    # 3a) Левый блок метрик — красим значения в колонке B
+    metrics_colors = {
+        "Workout Time": yellow_fill,
+        "Elapsed Time": yellow_fill,
+        "Active Kilocalories": red_fill,
+        "Total Kilocalories": red_fill,
+        "Avg. Pace": teal_fill,
+        "Distance": teal_fill,
+        "Elevation Gain": green_fill,
+        "Avg. Heart Rate": orange_fill,
+    }
+
+    for row_idx in range(2, ws.max_row + 1):
+        label = ws[f"A{row_idx}"].value
+        if not label:
+            continue
+        fill = metrics_colors.get(str(label))
+        if fill is not None:
+            ws[f"B{row_idx}"].fill = fill
+
+    # 3б) Правый блок — сплиты: окрашиваем Time / Pace / Heart Rate
+    for row_idx in range(2, ws.max_row + 1):
+        km_val = ws[f"D{row_idx}"].value
+        if km_val is None:
+            continue
+        # Есть номер километра — считаем, что это строка со сплитом
+        ws[f"E{row_idx}"].fill = yellow_fill   # Time
+        ws[f"F{row_idx}"].fill = teal_fill     # Pace
+        ws[f"G{row_idx}"].fill = orange_fill   # Heart Rate
 
 
 def compute_splits(hr_samples, dist_samples, start: dt.datetime, total_dist_km: float):
@@ -335,8 +398,18 @@ def compute_splits(hr_samples, dist_samples, start: dt.datetime, total_dist_km: 
 
 
 def main():
-    print("Поиск последней Walking-тренировки…")
-    info = find_last_walking_workout()
+    # Если передана дата в формате YYYY-MM-DD, ищем тренировку именно за эту дату,
+    # иначе берём самую последнюю Walking-тренировку.
+    target_date = None
+    if len(sys.argv) >= 2:
+        arg = sys.argv[1]
+        try:
+            target_date = dt.datetime.strptime(arg, "%Y-%m-%d").date()
+        except ValueError:
+            raise SystemExit(f"Неверный формат даты: {arg}. Ожидается YYYY-MM-DD, например 2025-12-07.")
+
+    print("Поиск Walking-тренировки…")
+    info = find_last_walking_workout(target_date)
 
     start = info["start"]
     end = info["end"]
